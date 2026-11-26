@@ -296,7 +296,6 @@ sequenceDiagram
 
 ```text
 linkedin-automation-gcp/
-├── GEMINI.md
 ├── README.md
 ├── package.json                     # Node.js 22 ESM + scripts start/job/token-check/test
 ├── Dockerfile                       # Imagem leve node:22-slim (usuário não-root)
