@@ -1,0 +1,93 @@
+# Cloud Workflows: Orquestração Human-in-the-Loop para posts técnicos no LinkedIn
+# Parâmetros esperados no disparo (Cloud Scheduler ou execução manual):
+#   {
+#     "project_id": "SEU_PROJECT_ID",
+#     "region": "us-central1",
+#     "job_name": "linkedin-curator-job",
+#     "approval_service_url": "https://linkedin-approval-service-xxxxx-uc.a.run.app",
+#     "approval_timeout_seconds": 172800
+#   }
+main:
+  params: [args]
+  steps:
+    - init:
+        assign:
+          - project_id: ${default(map.get(args, "project_id"), sys.get_env("GOOGLE_CLOUD_PROJECT_ID"))}
+          - region: ${default(map.get(args, "region"), "us-central1")}
+          - job_name: ${default(map.get(args, "job_name"), "linkedin-curator-job")}
+          - service_url: ${args.approval_service_url}
+          - timeout_seconds: ${default(map.get(args, "approval_timeout_seconds"), 172800)}
+          - run_id: ${sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID")}
+
+    - create_approval_callback:
+        call: events.create_callback_endpoint
+        args:
+          http_callback_method: "POST"
+        result: callback_details
+
+    - run_curator_job:
+        call: googleapis.run.v2.projects.locations.jobs.run
+        args:
+          name: ${"projects/" + project_id + "/locations/" + region + "/jobs/" + job_name}
+          body:
+            overrides:
+              containerOverrides:
+                - env:
+                    - name: RUN_ID
+                      value: ${run_id}
+                    - name: CALLBACK_URL
+                      value: ${callback_details.url}
+        result: job_execution
+
+    - wait_for_human_approval:
+        try:
+          call: events.await_callback
+          args:
+            callback: ${callback_details}
+            timeout: ${timeout_seconds}
+          result: approval_event
+        except:
+          as: err
+          steps:
+            - return_timeout:
+                return:
+                  status: "expired"
+                  run_id: ${run_id}
+                  reason: ${err.message}
+
+    - route_decision:
+        switch:
+          - condition: ${approval_event.http_request.body.decision == "approved"}
+            next: publish_to_linkedin
+          - condition: ${approval_event.http_request.body.decision == "no_content"}
+            next: finish_no_content
+        next: finish_rejected
+
+    - publish_to_linkedin:
+        call: http.post
+        args:
+          url: ${service_url + "/internal/publish"}
+          auth:
+            type: OIDC
+            audience: ${service_url}
+          body:
+            draft_id: ${approval_event.http_request.body.draft_id}
+        result: publish_response
+
+    - finish_published:
+        return:
+          status: "published"
+          run_id: ${run_id}
+          draft_id: ${approval_event.http_request.body.draft_id}
+          publish_response: ${publish_response.body}
+
+    - finish_no_content:
+        return:
+          status: "no_content"
+          run_id: ${run_id}
+
+    - finish_rejected:
+        return:
+          status: "rejected"
+          run_id: ${run_id}
+          draft_id: ${default(map.get(approval_event.http_request.body, "draft_id"), "")}

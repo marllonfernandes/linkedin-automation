@@ -1,0 +1,22 @@
+{
+  "name": "linkedin-automation-gcp",
+  "version": "0.1.0",
+  "description": "Serverless GCP automation (Node.js) for curating tech news, drafting LinkedIn posts with Gemini, and publishing with Human-in-the-Loop approval.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "start": "node src/service/server.js",
+    "job": "node src/job/main.js",
+    "token-check": "node src/job/tokenCheck.js",
+    "test": "node --test tests/*.test.js"
+  },
+  "dependencies": {
+    "@google-cloud/firestore": "^9.4.1",
+    "@google/genai": "^1.0.0",
+    "express": "^4.21.2",
+    "google-auth-library": "^10.0.0",
+    "rss-parser": "^3.13.0"
+  }
+}
