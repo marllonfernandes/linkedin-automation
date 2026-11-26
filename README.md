@@ -20,29 +20,150 @@ MVP completo em **Node.js 22 (ESM)** para curadoria automatizada de notícias de
 
 ## Arquitetura (Free Tier friendly)
 
-```text
-Cloud Scheduler (Seg/Qua/Sex às 09:00 America/Sao_Paulo)
-        │
-        ▼
-Cloud Workflows (orquestra + pausa até 48h sem custo via callback HTTP nativo)
-   │                                            ▲
-   ├─► Cloud Run Job (linkedin-curator-job)     │ callback autenticado (OAuth2)
-   │     ├─ Lê feeds RSS                        │
-   │     ├─ Deduplica URLs no Firestore         │
-   │     ├─ Gera 1–2 rascunhos (Gemini Flash)   │
-   │     ├─ Avalia se precisa de infográfico    │
-   │     │   └─ Gera PNG dark-mode (Gemini Img) │
-   │     │      e salva no Cloud Storage (GCS)  │
-   │     ├─ Salva no Firestore (pending)        │
-   │     └─ Envia prévia + botões no Telegram   │
-   │                                            │
-   │     Humano escolhe no Telegram:            │
-   │       • ✅ Publicar com imagem             │
-   │       • 📝 Publicar só texto               │
-   │       • ❌ Rejeitar (independente por tema)├─► Cloud Run Service (scale-to-zero)
-   │                                            │     (linkedin-approval-service)
-   ▼ (se decision == "approved")
-POST /internal/publish (OIDC) ──► Valida status == approved ──► GCS (PNG) + LinkedIn API
+### C4 Model — Diagrama de Containers
+
+```mermaid
+flowchart TB
+  User["👤 Autor / Revisor<br/>(Human-in-the-Loop)"]
+
+  subgraph GCP["☁️ Google Cloud Platform (Serverless / Free Tier)"]
+    direction TB
+    Sched1["⏱️ Cloud Scheduler<br/>Curadoria (Seg/Qua/Sex 09:00)"]
+    Sched2["⏱️ Cloud Scheduler<br/>Token Check (Seg 08:30)"]
+    WF["🔀 Cloud Workflows<br/>linkedin-publish-workflow<br/>(Callback HTTP nativo, zero custo ocioso)"]
+    JobCurator["⚙️ Cloud Run Job<br/>linkedin-curator-job<br/>(Node.js 22)"]
+    JobToken["⚙️ Cloud Run Job<br/>linkedin-token-check-job<br/>(Node.js 22)"]
+    Service["🌐 Cloud Run Service (scale-to-zero)<br/>linkedin-approval-service<br/>(Express / OIDC / Webhook)"]
+    FS[("🗄️ Cloud Firestore<br/>processed_urls, drafts, oauth_states")]
+    GCS[("🪣 Cloud Storage (Privado)<br/>Infográficos PNG")]
+    SM[("🔐 Secret Manager<br/>API Keys & OAuth Tokens")]
+  end
+
+  RSS["📰 Feeds RSS/Atom<br/>(IA, Arquitetura, Cloud)"]
+  Gemini["✨ Gemini API<br/>Flash (texto) + Pro Image (infográfico)"]
+  TG["💬 Telegram Bot API<br/>Prévia + Botões Inline"]
+  LI["💼 LinkedIn Official API<br/>Posts API + Images API + OAuth 2.0"]
+
+  Sched1 -->|OAuth2 POST| WF
+  WF -->|Executa Job| JobCurator
+  JobCurator -->|Lê artigos| RSS
+  JobCurator -->|Dedupe atômico + salva rascunho| FS
+  JobCurator -->|Gera post + infográfico| Gemini
+  JobCurator -->|Salva PNG| GCS
+  JobCurator -->|Lê segredos| SM
+  JobCurator -->|Envia prévia + botões| TG
+
+  User -->|Aprova / Rejeita / Renova| TG
+  TG -->|Webhook + Secret Token| Service
+  User -->|OAuth 1-clique| Service
+  Service -->|Atualiza status / Transação| FS
+  Service -->|Callback autenticado| WF
+  WF -->|POST /internal/publish OIDC| Service
+  Service -->|Baixa PNG| GCS
+  Service -->|Lê / Atualiza token| SM
+  Service -->|Publica post + imagem| LI
+
+  Sched2 -->|OAuth2 POST| JobToken
+  JobToken -->|Verifica idade do token| SM
+  JobToken -->|Valida /v2/userinfo| LI
+  JobToken -->|Salva OAuth state| FS
+  JobToken -->|Envia link 1-clique| TG
+```
+
+### Sequence Diagram — Fluxo Completo (Curadoria → Aprovação → Publicação)
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant CS as Cloud Scheduler
+  participant WF as Cloud Workflows
+  participant Job as Cloud Run Job (Curator)
+  participant RSS as Feeds RSS
+  participant FS as Firestore
+  participant AI as Gemini API (Flash + Image)
+  participant GCS as Cloud Storage
+  participant TG as Telegram
+  participant Human as Autor (Você)
+  participant Svc as Cloud Run Service
+  participant LI as LinkedIn API
+
+  CS->>WF: Dispara execução (Seg/Qua/Sex 09:00)
+  WF->>WF: Cria callback HTTP nativo (callback_url)
+  WF->>Job: Executa Job (RUN_ID, CALLBACK_URL)
+  Job->>RSS: Coleta artigos recentes (IA, Arquitetura, Cloud)
+
+  loop Até MAX_DRAFTS_PER_RUN (1-2 rascunhos)
+    Job->>FS: tryClaimArticle() via create() atômico (SHA-256)
+    alt Artigo novo
+      Job->>AI: Gera rascunho estruturado + needs_diagram (Gemini Flash)
+      opt needs_diagram == true
+        Job->>AI: Gera infográfico dark-mode PNG (Gemini Image)
+        Job->>GCS: Salva PNG privado (drafts/<id>.png)
+      end
+      Job->>FS: Salva rascunho (status = pending)
+      Job->>TG: Envia imagem PNG + texto + botões inline
+    end
+  end
+
+  WF->>WF: await_callback (pausa até 48h sem custo de compute)
+
+  Human->>TG: Clica em "✅ Publicar com imagem", "📝 Só texto" ou "❌ Rejeitar"
+  TG->>Svc: POST /webhook/telegram (X-Telegram-Bot-Api-Secret-Token)
+  Svc->>FS: Atualiza status (approved / rejected) + include_diagram
+
+  alt Rejeitou 1 de 2 rascunhos (outro ainda pending)
+    Svc->>TG: "Rascunho rejeitado. Você ainda pode aprovar o outro!"
+    Note over WF: Permanece pausado aguardando decisão no 2º rascunho
+  else Aprovou ou rejeitou todos
+    Svc->>WF: POST callback_url (decision + draft_id)
+  end
+
+  opt decision == "approved"
+    WF->>Svc: POST /internal/publish (Token OIDC da Service Account)
+    Svc->>FS: claimForPublish() transacional (approved → publishing)
+    opt include_diagram == true
+      Svc->>GCS: Baixa PNG do infográfico
+      Svc->>LI: POST /rest/images?action=initializeUpload + PUT binário
+    end
+    Svc->>LI: POST /rest/posts (Little Text escapado + media URN)
+    LI-->>Svc: 201 Created (linkedin_post_urn)
+    Svc->>FS: markPublished (status = published)
+    Svc->>TG: Envia confirmação com URN publicado
+  end
+```
+
+### Sequence Diagram — Renovação do Token LinkedIn em 1 Clique
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant CS as Cloud Scheduler (Seg 08:30)
+  participant Job as Cloud Run Job (Token Check)
+  participant SM as Secret Manager
+  participant FS as Firestore
+  participant TG as Telegram
+  participant Human as Autor (Você)
+  participant Svc as Cloud Run Service
+  participant LI as LinkedIn OAuth 2.0
+
+  CS->>Job: Executa checagem semanal
+  Job->>SM: Lê metadata da versão :latest (createTime)
+  Job->>LI: GET /v2/userinfo (valida token ativo)
+
+  opt Faltam <= 7 dias ou token inválido
+    Job->>FS: Salva oauth_state de uso único (TTL 48h)
+    Job->>TG: Envia alerta + link /auth/linkedin/start?state=...
+    Human->>Svc: Clica no link (GET /auth/linkedin/start)
+    Svc->>FS: Valida state ativo
+    Svc-->>Human: 302 Redirect para tela oficial de consentimento LinkedIn
+    Human->>LI: Clica em "Permitir"
+    LI-->>Svc: GET /auth/linkedin/callback?code=...&state=...
+    Svc->>FS: consumeOAuthState() via transação (bloqueia replay)
+    Svc->>LI: POST /oauth/v2/accessToken (troca code por novo token)
+    Svc->>LI: GET /v2/userinfo (confirma LINKEDIN_AUTHOR_URN)
+    Svc->>SM: addSecretVersion("linkedin-access-token", novo_token)
+    Svc->>TG: "✅ Token renovado por mais 60 dias!"
+  end
 ```
 
 ### Garantias de segurança e boas práticas
