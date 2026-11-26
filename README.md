@@ -20,7 +20,113 @@ MVP completo em **Node.js 22 (ESM)** para curadoria automatizada de notícias de
 
 ## Arquitetura (Free Tier friendly)
 
-### C4 Model — Diagrama de Containers
+### Arquitetura Cloud (`architecture-beta`)
+
+```mermaid
+architecture-beta
+    group gcp(cloud)[Google Cloud Platform Serverless]
+    group ext(internet)[Sistemas Externos]
+
+    service scheduler(server)[Cloud Scheduler] in gcp
+    service workflows(server)[Cloud Workflows] in gcp
+    service job(server)[Cloud Run Jobs] in gcp
+    service service_api(server)[Cloud Run Service] in gcp
+    service firestore(database)[Firestore] in gcp
+    service gcs(disk)[Cloud Storage] in gcp
+    service secrets(disk)[Secret Manager] in gcp
+
+    service rss(internet)[Feeds RSS] in ext
+    service gemini(cloud)[Gemini API] in ext
+    service telegram(internet)[Telegram Bot] in ext
+    service linkedin(internet)[LinkedIn API] in ext
+
+    scheduler:R --> L:workflows
+    workflows:R --> L:job
+    workflows:B --> T:service_api
+    job:B --> T:firestore
+    job:R --> L:gcs
+    service_api:L --> R:firestore
+    service_api:B --> T:secrets
+    job:T --> B:rss
+    job:R --> L:gemini
+    job:R --> L:telegram
+    telegram:L --> R:service_api
+    service_api:R --> L:linkedin
+```
+
+### C4 Model — Nível 1: Contexto (`C4Context`)
+
+```mermaid
+C4Context
+  title Diagrama de Contexto — Automação de Posts Técnicos no LinkedIn
+
+  Person(author, "Autor / Revisor", "Revisa rascunhos, aprova/rejeita publicações e renova OAuth em 1 clique.")
+
+  System(system, "LinkedIn Automation GCP", "Orquestra curadoria RSS, geração de rascunhos e infográficos via IA e publicação com aprovação humana.")
+
+  System_Ext(rss, "Feeds RSS / Atom", "Blogs técnicos de IA, Arquitetura de Soluções e Cloud.")
+  System_Ext(gemini, "Gemini API", "Gera texto técnico estruturado (Flash) e infográficos dark-mode (Pro Image).")
+  System_Ext(telegram, "Telegram Bot API", "Entrega prévias com botões inline e envia callbacks de decisão.")
+  System_Ext(linkedin, "LinkedIn Official API", "Publica posts/imagens (Posts + Images API) e autentica via OAuth 2.0.")
+
+  Rel(system, rss, "Coleta artigos técnicos", "HTTPS / RSS")
+  Rel(system, gemini, "Gera rascunhos e infográficos PNG", "HTTPS / JSON")
+  Rel(system, telegram, "Envia prévias e alertas de token", "HTTPS / Bot API")
+  Rel(author, telegram, "Aprova (com/sem imagem) ou rejeita", "App Telegram")
+  Rel(telegram, system, "Dispara webhook autenticado", "HTTPS / Webhook")
+  Rel(author, system, "Renova token OAuth em 1 clique", "HTTPS / OAuth 2.0")
+  Rel(system, linkedin, "Publica post + imagem e valida perfil", "HTTPS / REST OAuth 2.0")
+```
+
+### C4 Model — Nível 2: Containers (`C4Container`)
+
+```mermaid
+C4Container
+  title Diagrama de Containers — LinkedIn Automation GCP (Serverless)
+
+  Person(author, "Autor / Revisor", "Aprova posts no Telegram e autoriza renovação OAuth.")
+
+  System_Boundary(gcp, "Google Cloud Platform (Free Tier)") {
+    Container(schedCurator, "Cloud Scheduler (Curadoria)", "GCP Cron", "Dispara o fluxo Seg/Qua/Sex às 09:00 BRT.")
+    Container(schedToken, "Cloud Scheduler (Token)", "GCP Cron", "Verifica expiração do token toda Segunda às 08:30 BRT.")
+    Container(workflows, "Cloud Workflows", "YAML / HTTP Callbacks", "Orquestra curadoria e pausa até 48h sem custo ocioso.")
+    Container(jobCurator, "Curator Job", "Cloud Run Job / Node.js 22", "Lê RSS, deduplica, chama Gemini e notifica no Telegram.")
+    Container(jobToken, "Token Check Job", "Cloud Run Job / Node.js 22", "Checa idade/validade do token e envia link de renovação.")
+    Container(approvalSvc, "Approval & Publish Service", "Cloud Run Service / Express", "Scale-to-zero; recebe webhook Telegram, OAuth e /internal/publish.")
+    ContainerDb(firestore, "Cloud Firestore", "NoSQL Native", "Persiste processed_urls, drafts e oauth_states transacionais.")
+    ContainerDb(gcs, "Cloud Storage", "Bucket Privado", "Armazena infográficos PNG entre geração e publicação.")
+    ContainerDb(secrets, "Secret Manager", "Cofre de Segredos", "Armazena API keys e versões do token OAuth do LinkedIn.")
+  }
+
+  System_Ext(rss, "Feeds RSS", "Artigos de tecnologia")
+  System_Ext(gemini, "Gemini API", "Flash + Pro Image")
+  System_Ext(telegram, "Telegram Bot API", "Notificações e botões")
+  System_Ext(linkedin, "LinkedIn API", "Posts + Images + OAuth 2.0")
+
+  Rel(schedCurator, workflows, "Dispara execução", "HTTPS / OAuth2")
+  Rel(workflows, jobCurator, "Executa com RUN_ID e CALLBACK_URL", "Cloud Run API v2")
+  Rel(jobCurator, rss, "Busca artigos", "HTTPS")
+  Rel(jobCurator, gemini, "Gera texto e PNG", "HTTPS")
+  Rel(jobCurator, gcs, "Faz upload do PNG", "HTTPS / GCS API")
+  Rel(jobCurator, firestore, "Reserva URL e salva draft", "gRPC")
+  Rel(jobCurator, telegram, "Envia prévia + botões", "HTTPS")
+
+  Rel(author, telegram, "Clica em Aprovar / Rejeitar", "Telegram")
+  Rel(telegram, approvalSvc, "POST /webhook/telegram", "HTTPS + Secret Token")
+  Rel(approvalSvc, firestore, "Atualiza status / Transações", "gRPC")
+  Rel(approvalSvc, workflows, "Dispara callback HTTP", "HTTPS / OAuth2")
+  Rel(workflows, approvalSvc, "POST /internal/publish", "HTTPS / OIDC")
+  Rel(approvalSvc, gcs, "Baixa PNG do infográfico", "HTTPS / GCS API")
+  Rel(approvalSvc, linkedin, "Publica post e imagem", "HTTPS / REST")
+
+  Rel(schedToken, jobToken, "Dispara checagem semanal", "Cloud Run API v2")
+  Rel(jobToken, secrets, "Consulta createTime (:latest)", "HTTPS / Secret Manager")
+  Rel(jobToken, telegram, "Envia link /auth/linkedin/start", "HTTPS")
+  Rel(author, approvalSvc, "Autoriza renovação OAuth", "HTTPS")
+  Rel(approvalSvc, secrets, "Salva nova versão do token", "HTTPS / Secret Manager")
+```
+
+### Visão Geral de Componentes (Fluxo Detalhado)
 
 ```mermaid
 flowchart TB
