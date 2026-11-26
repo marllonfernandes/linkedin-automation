@@ -25,39 +25,37 @@ MVP completo em **Node.js 22 (ESM)** para curadoria automatizada de notícias de
 ```mermaid
 architecture-beta
     group gcp(cloud)[Google Cloud Platform Serverless]
-    group data(database)[Camada de Dados GCP] in gcp
     group ext(internet)[APIs Externas]
 
     service scheduler(server)[Cloud Scheduler] in gcp
     service workflows(server)[Cloud Workflows] in gcp
     service job(server)[Cloud Run Jobs] in gcp
     service service_api(server)[Cloud Run Service] in gcp
-
-    service firestore(database)[Firestore] in data
-    service gcs(disk)[Cloud Storage] in data
-    service secrets(disk)[Secret Manager] in data
+    service firestore(database)[Firestore] in gcp
+    service gcs(disk)[Cloud Storage] in gcp
+    service secrets(disk)[Secret Manager] in gcp
 
     service rss(internet)[Feeds RSS] in ext
     service gemini(cloud)[Gemini API] in ext
     service telegram(internet)[Telegram Bot] in ext
     service linkedin(internet)[LinkedIn API] in ext
 
-    junction j_job in gcp
     junction j_ext in ext
 
     scheduler:R --> L:workflows
     workflows:R --> L:job
     workflows:B --> T:service_api
-    job:B --> T:j_job
-    j_job:L --> R:firestore
-    j_job:B --> T:gcs
-    service_api:B --> T:secrets
+
+    job:T --> B:gcs
+    job:B --> T:firestore
+    service_api:R --> L:firestore
+    service_api:L --> R:secrets
 
     job:R --> L:j_ext
     j_ext:T --> B:rss
     j_ext:R --> L:gemini
     j_ext:B --> T:telegram
-    service_api:R --> L:linkedin
+    service_api:B --> T:linkedin
 ```
 
 ### C4 Model — Nível 1: Contexto (`C4Context`)
